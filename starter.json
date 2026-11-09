@@ -1,0 +1,21 @@
+{
+  "name": "Lights Out",
+  "genre": "horror",
+  "dim": "3D",
+  "mode": "Co-op",
+  "players": "2–4",
+  "hook": "Find the fuses. Don’t get caught.",
+  "how": "The power is out. Search the dark building for the fuses with your flashlights and carry them to the breaker. Something is hunting you: it hears footsteps and sees flashlights. If it catches you, a teammate can get you back up.",
+  "controls": "WASD to walk, mouse to aim the flashlight, Shift to run, F for the flashlight, or the touch stick and buttons",
+  "uses": [
+    ["Host-run rules", "The host's browser places the fuses, moves the monster and decides who gets caught; if it leaves, the next player takes over."],
+    ["Bots", "AI teammates search, fetch fuses and revive you until friends join."],
+    ["Rounds", "Each run starts, ends and restarts together for everyone."],
+    ["Leaderboard", "The fastest escapes."]
+  ],
+  "ideas": [
+    "Add lockers you can hide in",
+    "Make the flashlight batteries run out",
+    "Add a second monster on hard mode"
+  ]
+}

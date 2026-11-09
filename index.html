@@ -1,0 +1,838 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lights Out</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #05060a; }
+  body { font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #f3efe6; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; touch-action: none; cursor: crosshair; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 2px 4px #000c; font-weight: 700; }
+  #fuses { top: max(12px, env(safe-area-inset-top)); left: 16px; font-size: 22px; letter-spacing: .02em; }
+  #clock { top: calc(max(12px, env(safe-area-inset-top)) + 32px); left: 16px; font-size: 14px; opacity: .85; }
+  #team { top: max(12px, env(safe-area-inset-top)); right: 16px; font-size: 13px; text-align: right; line-height: 1.6; }
+  #team .me { color: #ffd23f; }
+  #big { inset: 0; display: grid; place-items: center; text-align: center; font-size: clamp(22px, 5vw, 38px); padding: 0 16px; }
+  #big small { display: block; font-size: 16px; opacity: .85; font-weight: 600; }
+  #msg { left: 0; right: 0; bottom: calc(max(14px, env(safe-area-inset-bottom)) + 30px); text-align: center; font-size: 16px; padding: 0 16px; }
+  #net { bottom: max(10px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 600; opacity: .7; white-space: nowrap; }
+  #fear { position: fixed; inset: 0; pointer-events: none; opacity: 0; background: radial-gradient(ellipse at center, transparent 40%, #c0001a 125%); }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #0008; }
+  #over[hidden], .pad[hidden], #stick[hidden] { display: none; }
+  .card { width: min(380px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; padding: 20px; border-radius: 16px; background: #14151f; border: 1px solid #ffffff22; box-sizing: border-box; }
+  .card h2 { margin: 0 0 4px; font-size: 24px; }
+  .card h3 { margin: 14px 0 4px; font-size: 14px; color: #ffd23f; }
+  .card ol { margin: 0; padding-left: 24px; font-size: 14px; }
+  .card li span { float: right; font-variant-numeric: tabular-nums; }
+  .card p { margin: 6px 0 0; font-size: 14px; opacity: .85; }
+  button.go { margin-top: 16px; width: 100%; min-height: 48px; border: 0; border-radius: 12px; background: #ffd23f; color: #1b1400; font: 800 17px system-ui, sans-serif; cursor: pointer; }
+  .pad { position: fixed; right: max(16px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); display: flex; gap: 12px; }
+  .pad button { width: 76px; height: 76px; border-radius: 50%; border: 2px solid #ffffff77; background: #ffffff1a; color: #fff; font: 800 14px system-ui, sans-serif; touch-action: none; }
+  .pad button.on { background: #ffd23f55; }
+  #stick { position: fixed; width: 110px; height: 110px; margin: -55px 0 0 -55px; border-radius: 50%; border: 2px solid #ffffff55; background: #ffffff12; pointer-events: none; }
+  #stick i { position: absolute; left: 35px; top: 35px; width: 40px; height: 40px; border-radius: 50%; background: #ffffff66; }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+<script type="importmap">{ "imports": { "three": "./libs/three.module.min.js" } }</script>
+</head>
+<body>
+<div id="fear"></div>
+<div class="hud" id="fuses"></div>
+<div class="hud" id="clock"></div>
+<div class="hud" id="team"></div>
+<div class="hud" id="big"></div>
+<div class="hud" id="msg"></div>
+<div class="hud" id="net">Connecting…</div>
+<div id="stick" hidden><i></i></div>
+<div class="pad" id="pad" hidden><button data-k="run">RUN</button><button data-k="light" class="on">LIGHT</button></div>
+<div id="over" hidden><div class="card">
+  <h2 id="overTitle"></h2><p id="overLine"></p>
+  <h3>Fastest escapes</h3><ol id="board"><li>Loading…</li></ol>
+  <button class="go" id="again">Play again</button>
+  <p id="next"></p>
+</div></div>
+<script type="module">
+/* ═══ LIGHTS OUT · a Multiplayer Agent starter ═════════════════════════════════════════
+ * Find the fuses. Don't get caught. Co-op, 2–4 players; bot teammates fill empty seats.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ speeds, the monster's senses, timers, the building's map
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   MAP ........... reading CONFIG.map: walls, paths (for the monster and bots), line of sight
+ *   SCENE ......... floor, walls, crates, the breaker, fuses, lights
+ *   PEOPLE ........ the player and monster models, flashlights
+ *   RUN (HOST) .... phases (brief, hunt, won, lost), fuses, catching, reviving, the monster
+ *                   and the bot teammates. Only the host writes these.
+ *   ME ............ walking, aiming, picking up fuses. Each player writes only its own.
+ *   HUD & RESULTS . fuse count, team, messages, results card, leaderboard
+ *   INPUT & SOUND . keyboard, mouse, touch stick and buttons, WebAudio effects
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - Each player writes its OWN entity: `p` (one packed JSON field: position, facing,
+ *     flashlight on/off, noise) about 12 times a second, `hb` (heartbeat) once a second,
+ *     and `n`/`c` (name, color) once.
+ *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last 3s),
+ *     worked out every frame. Only the host writes the shared fields `game` (id, v, phase,
+ *     seed, timers, the fuses and who carries them, who is downed and who is reviving),
+ *     `mon` (the monster) and `bots`. The host's browser runs the monster: it patrols,
+ *     hears footsteps, chases what it sees and downs who it catches. A new host adopts
+ *     all three from state and carries on.
+ *   - Intents to the host: "take" {i} (pick up fuse i; the host checks you are next to it
+ *     and awards it) and "again" (skip the results wait). Carrying a fuse to the breaker,
+ *     catching and reviving are decided by the host from everyone's positions.
+ *   - A new run starts only when the host bumps game.id; every client then resets to the
+ *     start. The fuse spots come from game.seed.
+ *   - ?attract plays offline with bots only (the preview video is recorded from it).
+ *   - Leaderboard "fastest-escape": the team's time, stored as 600000 - ms (higher is better).
+ */
+import * as THREE from "three";
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  seats: 4,             // bot teammates fill the team up to this many
+  fuses: 4,             // fuses to find (the map marks more places than this with "f")
+  timeLimit: 240000,    // ms to restore the power before the lights stay out
+  briefMs: 4000,        // ms at the start before the monster wakes up
+  resultsMs: 12000,     // ms the results show before the next run
+  walk: 3.4, run: 5.6,  // your speeds, units/s (running is loud)
+  botWalk: 3.0, botRun: 5.0,  // bot teammates: a little slower walking, about as fast as the monster running
+  radius: 0.35,         // how wide a person is, for walls
+  // The monster: speeds (units/s), how far it sees (flashlight on / off) and hears (walking / running),
+  // ms it stays asleep after the lights go out, ms it stops after a catch, ms it keeps chasing what it lost.
+  monster: { patrol: 2.0, hunt: 3.3, chase: 4.9, sight: 11, sightDark: 3.5, hearWalk: 5, hearRun: 12, catch: 1.0, sleepMs: 8000, eatMs: 3500, giveUpMs: 3000 },
+  reviveMs: 3000,       // ms a teammate stands next to you to get you up
+  reach: 1.5,           // how close you get to pick up a fuse or revive someone
+  breakerReach: 2.6,    // how close a carrier gets to the breaker
+  ambient: 0.6,         // how much you see without a flashlight (0 = pitch black)
+  light: { range: 18, angle: 0.62, power: 70 },
+  shadows: true,        // your own flashlight casts wall shadows
+  board: "fastest-escape",
+  tile: 2,              // world units per map character
+  // The building. # wall, . floor, x crate, f a place a fuse can be,
+  // B the breaker, S where the team starts, M where the monster starts.
+  map: [
+    "#########################",
+    "#f...x#......f#x......f.#",
+    "#.....#.......#.........#",
+    "#..M...........x...x....#",
+    "#.....#.......#.........#",
+    "#x...f#.x.....#f......xx#",
+    "###.#######.#######.#####",
+    "#f......#.......#......f#",
+    "#..x....#...B...#.......#",
+    "#.......................#",
+    "#.......#...S...#...x...#",
+    "#x.....f#.......#.......#",
+    "###.#######.#######.#####",
+    "#f....#.......#.......f.#",
+    "#.....#...x...#.........#",
+    "#...........f...........#",
+    "#x...x#.......#x.......f#",
+    "#########################",
+  ],
+};
+const BOT_NAMES = ["Kit", "Moss", "Juno", "Pip", "Rook", "Ivy"];
+const COLORS = ["#ffd23f", "#4da6ff", "#ff6fb5", "#52d273", "#ff8c42", "#c77dff"];
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'lights-out',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+const memo = new Map();
+/** A shared JSON field, parsed once per change (read-only: never mutate what this returns). */
+function shared(key, fb) { const raw = S.shared[key], m = memo.get(key); if (m && m.raw === raw) return m.v; const v = parse(raw, fb); memo.set(key, { raw, v }); return v; }
+let net = null, S = { entities: { players: {} }, shared: {} };
+const seenHb = new Map();
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+
+// ── MAP ─────────────────────────────────────────────────────────────────────────────
+if (ATTRACT) { Object.assign(CONFIG, { briefMs: 300, resultsMs: 2500, fuses: 3, ambient: 2.2 }); Object.assign(CONFIG.monster, { hearWalk: 8, patrol: 2.6, sleepMs: 0 }); }
+const MAP = CONFIG.map, MH = MAP.length, MW = MAP[0].length, TS = CONFIG.tile;
+const cell = (cx, cz) => (MAP[cz] && MAP[cz][cx]) || "#";
+const solid = (cx, cz) => "#xB".includes(cell(cx, cz));
+const toCell = (v) => Math.floor(v / TS);
+const center = (cx, cz) => ({ x: (cx + 0.5) * TS, z: (cz + 0.5) * TS });
+const find = (ch) => MAP.flatMap((row, z) => [...row].flatMap((c, x) => (c === ch ? [center(x, z)] : [])));
+const SPAWN = find("S")[0], BREAKER = find("B")[0], FUSE_SPOTS = find("f");
+const MON_START = ATTRACT ? FUSE_SPOTS[[...FUSE_SPOTS.keys()].sort((a, b) => dist(FUSE_SPOTS[a], SPAWN) - dist(FUSE_SPOTS[b], SPAWN))[0]] : find("M")[0];
+const BREAKER_STAND = { x: BREAKER.x, z: BREAKER.z + TS }; // the free tile in front of the breaker
+const wallAt = (x, z) => solid(toCell(x), toCell(z));
+function dist(a, b) { return Math.hypot(a.x - b.x, a.z - b.z); }
+const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
+const clone = (o) => JSON.parse(JSON.stringify(o));
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+/** Walls block sight; crates don't (they're low). */
+function canSee(a, b) {
+  const d = dist(a, b), n = Math.ceil(d / 0.3);
+  for (let i = 1; i < n; i++) { const t = i / n; if (cell(toCell(a.x + (b.x - a.x) * t), toCell(a.z + (b.z - a.z) * t)) === "#") return false; }
+  return true;
+}
+const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+/** A walkable route from a to b as tile centres (ending at b), or [] if there is none. */
+function route(a, b) {
+  const sx = toCell(a.x), sz = toCell(a.z), gx = toCell(b.x), gz = toCell(b.z), goal = gx + gz * MW;
+  if (solid(gx, gz)) return [];
+  const prev = new Int32Array(MW * MH).fill(-1), q = [sx + sz * MW];
+  prev[q[0]] = q[0];
+  for (let h = 0; h < q.length && prev[goal] < 0; h++) {
+    const k = q[h], x = k % MW, z = (k / MW) | 0;
+    for (const [dx, dz] of DIRS) {
+      const nx = x + dx, nz = z + dz, n = nx + nz * MW;
+      if (solid(nx, nz) || prev[n] >= 0 || (dx && dz && (solid(x + dx, z) || solid(x, z + dz)))) continue;
+      prev[n] = k; q.push(n);
+    }
+  }
+  if (prev[goal] < 0) return [];
+  const out = [{ x: b.x, z: b.z }];
+  for (let k = prev[goal]; k !== prev[k]; k = prev[k]) out.unshift(center(k % MW, (k / MW) | 0));
+  return out;
+}
+/** Walk an agent ({x, z, h, path}) along its path. False when it has nowhere to go. */
+function follow(a, speed, dt) {
+  const p = a.path[0];
+  if (!p) return false;
+  const dx = p.x - a.x, dz = p.z - a.z, d = Math.hypot(dx, dz), step = speed * dt;
+  if (d <= step) { a.x = p.x; a.z = p.z; a.path.shift(); } else { a.x += (dx / d) * step; a.z += (dz / d) * step; }
+  if (d > 0.01) a.h += angDiff(Math.atan2(dx, dz), a.h) * Math.min(1, dt * 8);
+  return true;
+}
+/** Slide a person along walls. */
+function moveBody(o, dx, dz) {
+  const r = CONFIG.radius, hit = (x, z) => wallAt(x - r, z - r) || wallAt(x + r, z - r) || wallAt(x - r, z + r) || wallAt(x + r, z + r);
+  if (!hit(o.x + dx, o.z)) o.x += dx;
+  if (!hit(o.x, o.z + dz)) o.z += dz;
+}
+
+// ── SCENE ───────────────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio || 1));
+renderer.shadowMap.enabled = CONFIG.shadows;
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#05060a");
+scene.fog = new THREE.Fog("#05060a", 20, 46);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.5, 200);
+function fit() { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); }
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+const moon = new THREE.HemisphereLight("#6a7cc0", "#20160f", CONFIG.ambient); scene.add(moon);
+const mains = new THREE.DirectionalLight("#fff4dc", 0); mains.position.set(20, 40, 30); scene.add(mains); // the power coming back on
+
+function canvasTex(w, h, paint, rx, ry) {
+  const c = document.createElement("canvas"); c.width = w; c.height = h; paint(c.getContext("2d"), w, h);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  if (rx) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rx, ry); }
+  return t;
+}
+const noise = (c, w, h, n, a) => { for (let i = 0; i < n; i++) { c.fillStyle = `rgba(0,0,0,${Math.random() * a})`; c.fillRect(Math.random() * w, Math.random() * h, 3, 3); } };
+const floorTex = canvasTex(128, 128, (c, w, h) => {
+  for (let x = 0; x < 2; x++) for (let y = 0; y < 2; y++) { c.fillStyle = (x + y) % 2 ? "#5a5f6e" : "#6e6a62"; c.fillRect(x * 64, y * 64, 64, 64); }
+  noise(c, w, h, 900, 0.25); c.strokeStyle = "#0004"; c.lineWidth = 2; c.strokeRect(0, 0, w, h);
+}, MW, MH);
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(MW * TS, MH * TS), new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.85 }));
+floor.rotation.x = -Math.PI / 2; floor.position.set((MW * TS) / 2, 0, (MH * TS) / 2); floor.receiveShadow = true; scene.add(floor);
+
+const wallTex = canvasTex(64, 128, (c, w, h) => {
+  c.fillStyle = "#6b5b4a"; c.fillRect(0, 0, w, h);
+  for (let x = 0; x < w; x += 16) { c.fillStyle = "#5e4f40"; c.fillRect(x, 0, 8, h); }
+  c.fillStyle = "#3a3029"; c.fillRect(0, h - 22, w, 22); noise(c, w, h, 300, 0.3);
+});
+const WALL_H = 2.6, walls = find("#"), crates = find("x");
+const wallMats = [0, 1, 2, 3, 4, 5].map((i) => (i === 2 ? new THREE.MeshStandardMaterial({ color: "#22232d", roughness: 1 }) : new THREE.MeshStandardMaterial({ map: wallTex, roughness: 0.95 })));
+const wallMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(TS, WALL_H, TS), wallMats, walls.length);
+const crateMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1.5, 1.1, 1.5), new THREE.MeshStandardMaterial({ map: canvasTex(64, 64, (c) => { c.fillStyle = "#8a5a2e"; c.fillRect(0, 0, 64, 64); c.strokeStyle = "#5b3a1c"; c.lineWidth = 6; c.strokeRect(3, 3, 58, 58); c.beginPath(); c.moveTo(3, 3); c.lineTo(61, 61); c.stroke(); }), roughness: 0.9 }), crates.length);
+const mtx = new THREE.Matrix4();
+walls.forEach((p, i) => wallMesh.setMatrixAt(i, mtx.makeTranslation(p.x, WALL_H / 2, p.z)));
+crates.forEach((p, i) => crateMesh.setMatrixAt(i, mtx.makeRotationY(i * 0.7).setPosition(p.x, 0.55, p.z)));
+wallMesh.castShadow = wallMesh.receiveShadow = crateMesh.castShadow = crateMesh.receiveShadow = true;
+scene.add(wallMesh, crateMesh);
+
+const glowTex = canvasTex(64, 64, (c) => { const g = c.createRadialGradient(32, 32, 0, 32, 32, 32); g.addColorStop(0, "#fff"); g.addColorStop(0.3, "#ffffff88"); g.addColorStop(1, "#fff0"); c.fillStyle = g; c.fillRect(0, 0, 64, 64); });
+const glow = (color, size, opacity = 1) => { const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity })); s.scale.set(size, size, 1); return s; };
+
+// The breaker: a cabinet with one lamp per fuse, and a red light that turns green when the power is back.
+const breaker = new THREE.Group();
+breaker.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.8, 0.9), new THREE.MeshStandardMaterial({ color: "#5c6470", metalness: 0.4, roughness: 0.5 })), { castShadow: true }));
+breaker.children[0].position.y = 0.9;
+const lamps = Array.from({ length: CONFIG.fuses }, (_, i) => {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8), new THREE.MeshBasicMaterial({ color: "#5a1010" }));
+  m.position.set(-0.45 + (0.9 * i) / Math.max(1, CONFIG.fuses - 1), 1.5, 0.47); breaker.add(m); return m;
+});
+const breakerGlow = glow("#ff3030", 5, 0.5); breakerGlow.position.y = 1.2; breaker.add(breakerGlow);
+const breakerLight = new THREE.PointLight("#ff3030", 6, 9, 1.6); breakerLight.position.set(0, 2.2, 1); breaker.add(breakerLight);
+breaker.position.set(BREAKER.x, 0, BREAKER.z); scene.add(breaker);
+
+// Fuses: glowing yellow cartridges. Drawn from game.fuses every frame.
+const fuseGeo = new THREE.CylinderGeometry(0.17, 0.17, 0.62, 12), capGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.1, 12);
+const fuseMat = new THREE.MeshStandardMaterial({ color: "#ffd23f", emissive: "#ffb000", emissiveIntensity: 0.9 }), capMat = new THREE.MeshStandardMaterial({ color: "#c9ccd2", metalness: 0.8, roughness: 0.3 });
+function makeFuse(withGlow) {
+  const g = new THREE.Group(), body = new THREE.Mesh(fuseGeo, fuseMat);
+  g.add(body); for (const y of [-0.33, 0.33]) { const c = new THREE.Mesh(capGeo, capMat); c.position.y = y; g.add(c); }
+  if (withGlow) g.add(glow("#ffcf40", 2.4, 0.7));
+  scene.add(g); return g;
+}
+const fuseViews = [];
+
+// Sparks and mist: a small particle pool.
+const bits = [];
+function burst(x, y, z, color, n, speed) {
+  for (let i = 0; i < n; i++) {
+    const s = glow(color, 0.35 + Math.random() * 0.3); s.position.set(x, y, z); scene.add(s);
+    bits.push({ s, vx: (Math.random() - 0.5) * speed, vy: Math.random() * speed, vz: (Math.random() - 0.5) * speed, life: 0.6 + Math.random() * 0.5 });
+  }
+}
+
+// ── PEOPLE ──────────────────────────────────────────────────────────────────────────
+function nameTag(text) {
+  const tex = canvasTex(256, 64, (c) => { c.font = "bold 34px system-ui"; c.textAlign = "center"; c.lineWidth = 6; c.strokeStyle = "#000c"; c.strokeText(text, 128, 44); c.fillStyle = "#fff"; c.fillText(text, 128, 44); });
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true })); s.scale.set(3, 0.75, 1); s.position.y = 2.4; return s;
+}
+const ringGeos = Array.from({ length: 11 }, (_, i) => new THREE.RingGeometry(0.75, 0.95, 32, 1, Math.PI / 2, Math.max(0.01, (i / 10) * Math.PI * 2)));
+function makePerson(color, name) {
+  const g = new THREE.Group(), body = new THREE.Group(), mat = new THREE.MeshStandardMaterial({ color, roughness: 0.6 });
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.38, 0.95, 10), mat); torso.position.y = 0.75;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.32, 14, 10), new THREE.MeshStandardMaterial({ color: "#f1d2b5", roughness: 0.7 })); head.position.y = 1.5;
+  const torch = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 0.38, 8).rotateX(Math.PI / 2), new THREE.MeshStandardMaterial({ color: "#333" })); torch.position.set(0.28, 1.0, 0.3);
+  const lens = glow("#fff6d0", 0.6); lens.position.set(0.28, 1.0, 0.5);
+  body.add(torso, head, torch, lens); torso.castShadow = head.castShadow = true;
+  const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.5, 16), new THREE.MeshBasicMaterial({ color: "#000", transparent: true, opacity: 0.35 }));
+  shadow.rotation.x = -Math.PI / 2; shadow.position.y = 0.02;
+  const ring = new THREE.Mesh(ringGeos[10], new THREE.MeshBasicMaterial({ color: "#ff3355", transparent: true, opacity: 0.8, side: THREE.DoubleSide }));
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.05; ring.visible = false;
+  const carry = makeFuse(false); scene.remove(carry); carry.scale.setScalar(0.8); carry.position.y = 2.0; carry.visible = false;
+  g.add(body, shadow, ring, carry);
+  if (name) g.add(nameTag(name));
+  g.userData = { body, ring, carry, lens, mat };
+  scene.add(g); return g;
+}
+/** Lying down when downed, a revive ring filling up, a fuse over your head when carrying. */
+function pose(g, downed, revive, carrying, t) {
+  const u = g.userData;
+  u.body.rotation.x = downed ? -Math.PI / 2 : 0; u.body.position.y = downed ? 0.3 : 0; u.body.position.z = downed ? -0.7 : 0;
+  u.ring.visible = downed;
+  if (downed) { u.ring.geometry = ringGeos[Math.round(Math.min(1, revive) * 10)]; u.ring.material.color.set(revive > 0 ? "#52d273" : "#ff3355"); }
+  u.carry.visible = carrying; u.carry.rotation.y = t * 2;
+}
+const views = new Map(); // id -> { g, x, z, h, fresh } for everyone but me
+function viewOf(id, color, name) {
+  let v = views.get(id);
+  if (!v) { v = { g: makePerson(color, ATTRACT ? "" : name), x: 0, z: 0, h: 0, fresh: true }; views.set(id, v); }
+  return v;
+}
+function ease(v, x, z, h, dt) {
+  if (v.fresh) { v.x = x; v.z = z; v.h = h; v.fresh = false; }
+  const k = 1 - Math.pow(0.0008, dt);
+  v.x += (x - v.x) * k; v.z += (z - v.z) * k; v.h += angDiff(h, v.h) * k;
+  v.g.position.set(v.x, 0, v.z); v.g.rotation.y = v.h;
+}
+
+// The monster: tall, dark, glowing eyes, a red haze around it so you can always spot it.
+const monster = new THREE.Group();
+{
+  const dark = new THREE.MeshStandardMaterial({ color: "#121216", roughness: 1 });
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.6, 2.1, 9), dark); torso.position.y = 1.05;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.42, 12, 10), dark); head.position.set(0, 2.3, 0.18);
+  const armGeo = new THREE.BoxGeometry(0.16, 1.7, 0.16);
+  for (const s of [-1, 1]) { const a = new THREE.Mesh(armGeo, dark); a.position.set(s * 0.62, 1.25, 0.2); a.rotation.z = s * 0.18; a.rotation.x = -0.35; monster.add(a); }
+  const eyeMat = new THREE.MeshBasicMaterial({ color: "#ff2a2a" });
+  for (const s of [-1, 1]) { const e = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 6), eyeMat); e.position.set(s * 0.16, 2.36, 0.56); monster.add(e); }
+  const haze = glow("#ff1a1a", 4.5, 0.55); haze.position.y = 1.4; monster.userData.haze = haze;
+  const eyesGlow = glow("#ff4040", 1.1, 0.9); eyesGlow.position.set(0, 2.36, 0.6);
+  torso.castShadow = true;
+  monster.add(torso, head, haze, eyesGlow);
+  scene.add(monster);
+}
+const monView = { x: 0, z: 0, h: 0, fresh: true };
+
+// Flashlights: one spotlight per nearby person (a fixed pool, so the scene never recompiles).
+const torches = Array.from({ length: 4 }, (_, i) => {
+  const L = new THREE.SpotLight("#fff1cf", CONFIG.light.power, CONFIG.light.range, CONFIG.light.angle, 0.45, 1.3);
+  if (i === 0 && CONFIG.shadows) { L.castShadow = true; L.shadow.mapSize.set(512, 512); L.shadow.camera.near = 0.3; L.shadow.bias = -0.002; }
+  scene.add(L, L.target); return L;
+});
+function aimTorch(L, x, z, h, on, downed, t, i) {
+  const fl = on ? 0.92 + 0.08 * Math.sin(t * 23 + i * 5) * Math.sin(t * 3.1 + i) : 0;
+  L.intensity = CONFIG.light.power * fl * (downed ? 0.35 : 1);
+  L.position.set(x + Math.sin(h) * 0.3, downed ? 0.4 : 1.1, z + Math.cos(h) * 0.3);
+  L.target.position.set(x + Math.sin(h) * 6, 0, z + Math.cos(h) * 6);
+}
+
+// ── RUN (HOST) ──────────────────────────────────────────────────────────────────────
+const host = { last: null, was: false, bots: new Map(), mon: null, gameId: 0, again: false, lastPub: 0, lastPos: new Map(), known: new Set(), searched: new Set() };
+/** The run as state has it, or the host's own newer write that hasn't come back yet. `v` only goes up. */
+function game() { const g = shared("game", null); return host.last && isHost() && (!g || host.last.v > g.v) ? host.last : g; }
+function writeGame(g) { g = { ...g, v: (game()?.v ?? 0) + 1 }; host.last = g; net.setShared("game", JSON.stringify(g)); return g; }
+
+function newGame(id) {
+  const seed = (Math.random() * 1e9) | 0, r = mulberry32(seed), spots = [...FUSE_SPOTS], fuses = [];
+  for (let i = spots.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [spots[i], spots[j]] = [spots[j], spots[i]]; }
+  for (const s of spots) if (fuses.length < CONFIG.fuses && fuses.every((f) => dist(f, s) > 9)) fuses.push({ x: s.x, z: s.z, b: "", in: 0 });
+  const t = Date.now();
+  return { id, phase: "brief", seed, startAt: t + CONFIG.briefMs, endsAt: t + CONFIG.briefMs + CONFIG.timeLimit, fuses, down: {}, rev: {}, ms: 0 };
+}
+function startRun(id) {
+  const g = writeGame(newGame(id));
+  host.gameId = g.id; host.known.clear(); host.searched.clear();
+  host.mon = { x: MON_START.x, z: MON_START.z, h: 0, s: "patrol", t: "", goal: null, path: [], think: 0, until: 0, lostAt: 0 };
+  let n = 0;
+  for (const b of host.bots.values()) Object.assign(b, spawnSpot(4 + n++), { path: [], goal: null, mode: "search", think: 0 });
+  return g;
+}
+/** Spot n of a small ring around the start (players take 0-3, bots 4 and up). */
+const spawnSpot = (n) => ({ x: SPAWN.x + Math.sin(n * 2.4) * 1.4 * (n ? 1 : 0), z: SPAWN.z + Math.cos(n * 2.4) * 1.1 * (n ? 1 : 0), h: Math.PI });
+/** Become host: take over the run, the monster and the bots exactly as state has them. */
+function adopt() {
+  host.was = true; host.gameId = game()?.id || 0; host.bots.clear();
+  for (const b of shared("bots", [])) host.bots.set(b.i, { id: b.i, name: b.n, color: b.c, x: b.x, z: b.z, h: b.h, path: [], goal: null, mode: "search", think: 0 });
+  const m = shared("mon", null);
+  host.mon = { x: m ? m.x : MON_START.x, z: m ? m.z : MON_START.z, h: m ? m.h : 0, s: m && m.s !== "eat" ? m.s : "patrol", t: m ? m.t : "", goal: null, path: [], think: 0, until: 0, lostAt: Date.now() };
+}
+function botList() {
+  if (isHost()) return [...host.bots.values()].map((b) => ({ i: b.id, n: b.name, c: b.color, x: b.x, z: b.z, h: b.h, r: b.r ? 1 : 0, mv: b.mv ? 1 : 0 }));
+  return shared("bots", []);
+}
+const posCache = new Map();
+/** Another player's packed `p` field, parsed once per change. */
+function posOf(id, p) { let c = posCache.get(id); if (!c || c.raw !== p.p) { c = { raw: p.p, v: parse(p.p, null) }; posCache.set(id, c); } return c.v; }
+/** The whole team as { id, name, color, x, z, h, light, noise, bot, mine }. */
+function people() {
+  const out = [], live = new Set(livePlayers());
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    if (id === net.sessionId) { out.push({ id, name: myName, color: myColor, x: me.x, z: me.z, h: me.h, light: me.light, noise: me.noise, mine: true }); continue; }
+    const q = posOf(id, p);
+    if (live.has(id) && q) out.push({ id, name: p.n || "Player", color: p.c || "#ccc", x: q.x, z: q.z, h: q.h, light: !!q.l, noise: q.m || 0 });
+  }
+  for (const b of botList()) out.push({ id: b.i, name: b.n, color: b.c, x: b.x, z: b.z, h: b.h, light: true, noise: b.r ? 2 : b.mv ? 1 : 0, bot: true });
+  return out;
+}
+
+function hostTick(dt, now) {
+  if (!host.was) adopt();
+  let g = game();
+  if (!g) g = startRun(1);
+  if (host.gameId !== g.id) host.gameId = g.id;
+  const t = Date.now(), G = clone(g);
+  let dirty = fillBots(G);
+  const all = people(), up = all.filter((c) => !G.down[c.id]);
+  for (const c of all) host.lastPos.set(c.id, { x: c.x, z: c.z });
+  if (G.phase === "brief" && t >= G.startAt) { G.phase = "hunt"; dirty = true; }
+  if (G.phase === "hunt") {
+    dirty = monsterTick(dt, G, up, t) || dirty;
+    for (const f of G.fuses) { // carriers: gone → drop it; at the breaker → plug it in
+      if (f.in || !f.b) continue;
+      const c = all.find((o) => o.id === f.b);
+      if (!c) { Object.assign(f, host.lastPos.get(f.b) || {}, { b: "" }); dirty = true; }
+      else if (dist(c, BREAKER) < CONFIG.breakerReach) { Object.assign(f, { b: "", in: 1, x: BREAKER.x, z: BREAKER.z }); dirty = true; }
+    }
+    for (const id of Object.keys(G.down)) { // reviving: a teammate standing next to you for reviveMs
+      const v = all.find((c) => c.id === id), helper = v && up.find((c) => c.id !== id && !G.down[c.id] && dist(c, v) < CONFIG.reach + 0.3);
+      if (!v) { delete G.down[id]; delete G.rev[id]; dirty = true; }
+      else if (helper && !G.rev[id]) { G.rev[id] = t; dirty = true; }
+      else if (!helper && G.rev[id]) { delete G.rev[id]; dirty = true; }
+      else if (G.rev[id] && t - G.rev[id] >= CONFIG.reviveMs) { delete G.down[id]; delete G.rev[id]; dirty = true; }
+    }
+    if (G.fuses.every((f) => f.in)) Object.assign(G, { phase: "won", ms: t - G.startAt, endsAt: t + CONFIG.resultsMs }), (dirty = true);
+    else if (!all.some((c) => !G.down[c.id]) || t >= G.endsAt) Object.assign(G, { phase: "lost", endsAt: t + CONFIG.resultsMs }), (dirty = true);
+  }
+  dirty = botsTick(dt, G, all, t) || dirty;
+  if (dirty) writeGame(G);
+  if ((G.phase === "won" || G.phase === "lost") && (t >= G.endsAt || host.again)) startRun(G.id + 1);
+  host.again = false;
+  if (now - host.lastPub > 100) { // ~10/s: one message for the monster, one for all the bots
+    host.lastPub = now;
+    const m = host.mon, r1 = (v) => Math.round(v * 100) / 100;
+    net.setShared("mon", JSON.stringify({ x: r1(m.x), z: r1(m.z), h: r1(m.h), s: m.s, t: m.t }));
+    net.setShared("bots", JSON.stringify(botList().map((b) => ({ ...b, x: r1(b.x), z: r1(b.z), h: r1(b.h) }))));
+  }
+}
+
+/** Bots fill the team up to CONFIG.seats. A bot that leaves drops its fuse. */
+function fillBots(G) {
+  const want = Math.max(0, CONFIG.seats - livePlayers().length);
+  let dirty = false;
+  while (host.bots.size > want) {
+    const id = [...host.bots.keys()].pop(), b = host.bots.get(id);
+    for (const f of G.fuses) if (f.b === id) { Object.assign(f, { b: "", x: b.x, z: b.z }); dirty = true; }
+    if (G.down[id]) { delete G.down[id]; delete G.rev[id]; dirty = true; }
+    host.bots.delete(id);
+  }
+  while (host.bots.size < want) {
+    const used = new Set([...host.bots.values()].map((b) => b.name)), name = BOT_NAMES.find((n) => !used.has(n)) || "Bot";
+    const usedC = new Set(people().map((p) => p.color)), id = "b" + Math.random().toString(36).slice(2, 6);
+    host.bots.set(id, { id, name, color: COLORS.find((c) => !usedC.has(c)) || COLORS[5], ...spawnSpot(4 + host.bots.size), path: [], goal: null, mode: "search", think: 0 });
+  }
+  return dirty;
+}
+
+/** The monster: patrols the rooms, walks to footsteps it hears, chases who it sees, downs who it catches. */
+function monsterTick(dt, G, up, t) {
+  const m = host.mon, M = CONFIG.monster;
+  if (t < G.startAt + M.sleepMs) return false; // still asleep
+  if (m.s === "eat") { if (t < m.until) return false; m.s = "patrol"; m.goal = null; m.path = []; }
+  let seen = null, sd = Infinity;
+  for (const c of up) {
+    const d = dist(m, c);
+    if (d > (c.light ? M.sight : M.sightDark) || d >= sd) continue;
+    if ((Math.abs(angDiff(Math.atan2(c.x - m.x, c.z - m.z), m.h)) < 1.2 || d < 3) && canSee(m, c)) { seen = c; sd = d; }
+  }
+  if (seen) { if (m.t !== seen.id) m.think = 0; Object.assign(m, { s: "chase", t: seen.id, goal: { x: seen.x, z: seen.z }, lostAt: t }); }
+  else if (m.s === "chase" && t - m.lostAt > M.giveUpMs) Object.assign(m, { s: "hunt", t: "" });
+  if (m.s !== "chase") for (const c of up) {
+    const r = c.noise === 2 ? M.hearRun : c.noise === 1 ? M.hearWalk : 0;
+    if (r && dist(m, c) < r) { if (m.s !== "hunt") m.think = 0; Object.assign(m, { s: "hunt", goal: { x: c.x, z: c.z } }); break; }
+  }
+  if (!m.goal) { m.goal = FUSE_SPOTS[Math.floor(Math.random() * FUSE_SPOTS.length)]; m.think = 0; }
+  if (t > m.think || !m.path.length) {
+    m.think = t + (m.s === "chase" ? 300 : 900); m.path = route(m, m.goal);
+    if (!m.path.length && m.s !== "chase") Object.assign(m, { s: "patrol", goal: null });
+  }
+  const speed = m.s === "chase" ? M.chase : m.s === "hunt" ? M.hunt : M.patrol;
+  if (seen && sd < 2.5) { const dx = seen.x - m.x, dz = seen.z - m.z; m.x += (dx / sd) * speed * dt; m.z += (dz / sd) * speed * dt; m.h = Math.atan2(dx, dz); }
+  else follow(m, speed, dt);
+  if (m.s !== "chase" && m.goal && dist(m, m.goal) < 0.8) Object.assign(m, { s: "patrol", goal: null });
+  for (const c of up) if (dist(m, c) < M.catch) {
+    G.down[c.id] = t;
+    for (const f of G.fuses) if (f.b === c.id) Object.assign(f, { b: "", x: c.x, z: c.z });
+    Object.assign(m, { s: "eat", until: t + M.eatMs, t: "", goal: null, path: [] });
+    return true;
+  }
+  return false;
+}
+
+/** Bot teammates (and your own player in ?attract): search the rooms, fetch fuses, revive, flee. */
+function botsTick(dt, G, all, t) {
+  let dirty = false;
+  const agents = [...host.bots.values()];
+  if (ATTRACT) agents.push(me);
+  for (const b of agents) {
+    b.mv = b.r = false;
+    if (G.down[b.id] || G.phase === "won" || G.phase === "lost" || G.phase === "brief") continue;
+    if (t > b.think) { b.think = t + 350 + Math.random() * 300; botThink(b, G, all); }
+    const fast = b.mode === "flee", speed = b === me ? (fast ? CONFIG.run : CONFIG.walk) : fast ? CONFIG.botRun : CONFIG.botWalk;
+    const waiting = b.mode === "revive" && b.goal && dist(b, b.goal) < CONFIG.reach * 0.8;
+    if (!waiting && follow(b, speed, dt)) { b.mv = true; b.r = fast; }
+    if (!G.fuses.some((f) => f.b === b.id)) G.fuses.forEach((f) => { if (!f.in && !f.b && !G.fuses.some((o) => o.b === b.id) && dist(b, f) < CONFIG.reach) { f.b = b.id; dirty = true; } });
+  }
+  return dirty;
+}
+function botThink(b, G, all) {
+  const m = host.mon, mine = G.fuses.some((f) => f.b === b.id);
+  G.fuses.forEach((f, i) => { if (!f.in && !f.b && dist(b, f) < 8 && canSee(b, f)) host.known.add(i); });
+  for (const s of FUSE_SPOTS) if (dist(b, s) < 3) host.searched.add(s);
+  let mode = "search", goal = null;
+  const near = (list) => list.sort((p, q) => dist(p, b) - dist(q, b))[0];
+  if (m.s !== "eat" && ((m.s === "chase" && m.t === b.id) || (dist(m, b) < 5 && canSee(m, b)))) {
+    mode = "flee"; goal = [...FUSE_SPOTS, SPAWN].filter((s) => dist(s, m) > dist(s, b) + 2).sort((p, q) => dist(q, m) - dist(q, b) * 0.6 - (dist(p, m) - dist(p, b) * 0.6))[0] || SPAWN;
+  } else {
+    const hurt = near(all.filter((c) => G.down[c.id] && c.id !== b.id && dist(c, m) > 4 && dist(c, b) < (mine ? 10 : 18)));
+    const taken = new Set([...host.bots.values()].filter((o) => o !== b && o.mode === "fetch").map((o) => o.fi));
+    const fuse = near([...host.known].filter((i) => !taken.has(i)).map((i) => ({ i, ...G.fuses[i] })).filter((f) => !f.in && !f.b));
+    if (hurt) { mode = "revive"; goal = { x: hurt.x, z: hurt.z }; }
+    else if (mine) { mode = "deliver"; goal = BREAKER_STAND; }
+    else if (fuse) { mode = "fetch"; goal = { x: fuse.x, z: fuse.z }; b.fi = fuse.i; }
+    else if (b.mode === "search" && b.goal && dist(b, b.goal) > 1.5 && b.path.length) goal = b.goal;
+    else { const open = FUSE_SPOTS.filter((s) => !host.searched.has(s)), list = open.length ? open : FUSE_SPOTS; goal = list[Math.floor(Math.random() * list.length)]; }
+  }
+  const same = b.goal && b.mode === mode && toCell(goal.x) === toCell(b.goal.x) && toCell(goal.z) === toCell(b.goal.z) && b.path.length;
+  b.mode = mode; b.goal = goal;
+  if (!same) b.path = route(b, goal);
+}
+
+// ── ME ──────────────────────────────────────────────────────────────────────────────
+const FRIENDLY = ["Brave", "Quiet", "Lucky", "Swift", "Sly", "Bold"], ANIMALS = ["Otter", "Fox", "Moth", "Owl", "Badger", "Hare"];
+const myName = (() => { try { return localStorage.getItem("mpa-name") || ""; } catch { return ""; } })() || FRIENDLY[Math.floor(Math.random() * 6)] + " " + ANIMALS[Math.floor(Math.random() * 6)];
+let myColor = COLORS[0]; // picked on join: the first color nobody in the room has
+const me = { id: "", x: SPAWN.x, z: SPAWN.z, h: Math.PI, light: true, noise: 0, mv: false, r: false, gameId: -1, lastSend: 0, tryAt: 0, path: [], goal: null, mode: "search", think: 0, g: null, firstHunt: 0 };
+const input = { up: false, down: false, left: false, right: false, run: false };
+const aim = { on: false, nx: 0, ny: 0 }, stick = { id: -1, ox: 0, oy: 0, x: 0, y: 0 };
+const ray = new THREE.Raycaster(), floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), hitPt = new THREE.Vector3();
+
+function myTick(dt, g) {
+  if (me.gameId !== g.id) { me.gameId = g.id; Object.assign(me, spawnSpot(Math.max(0, livePlayers().indexOf(net.sessionId)) % 4), { path: [], goal: null }); $("over").hidden = true; }
+  const down = g.phase === "hunt" && !!g.down[net.sessionId];
+  if (!ATTRACT) {
+    let mx = (input.right ? 1 : 0) - (input.left ? 1 : 0) + stick.x, mz = (input.down ? 1 : 0) - (input.up ? 1 : 0) + stick.y;
+    const len = Math.hypot(mx, mz);
+    if (len > 1) { mx /= len; mz /= len; }
+    me.mv = !down && len > 0.15; me.r = me.mv && input.run;
+    if (me.mv) {
+      const sp = me.r ? CONFIG.run : CONFIG.walk;
+      moveBody(me, mx * sp * dt, mz * sp * dt);
+      if (!aim.on) me.h += angDiff(Math.atan2(mx, mz), me.h) * Math.min(1, dt * 10);
+    }
+    if (aim.on && !down) {
+      ray.setFromCamera({ x: aim.nx, y: aim.ny }, camera);
+      if (ray.ray.intersectPlane(floorPlane, hitPt)) me.h = Math.atan2(hitPt.x - me.x, hitPt.z - me.z);
+    }
+    // Walk onto a fuse to ask the host for it.
+    if (g.phase === "hunt" && !down && !g.fuses.some((f) => f.b === net.sessionId) && performance.now() > me.tryAt) {
+      const i = g.fuses.findIndex((f) => !f.in && !f.b && dist(f, me) < CONFIG.reach);
+      if (i >= 0) { me.tryAt = performance.now() + 500; if (isHost()) applyTake(net.sessionId, i); else net.send("take", { i }); }
+    }
+  }
+  me.noise = me.mv ? (me.r ? 2 : 1) : 0;
+  const now = performance.now();
+  if (now - me.lastSend > 80) {
+    me.lastSend = now; const r1 = (v) => Math.round(v * 100) / 100;
+    net.me.set("p", JSON.stringify({ x: r1(me.x), z: r1(me.z), h: r1(me.h), l: me.light ? 1 : 0, m: me.noise, g: g.id }));
+  }
+}
+/** A "take" intent (or the host's own pickup): award the fuse if it's free and you're next to it. */
+function applyTake(id, i) {
+  const g = game();
+  if (!g || g.phase !== "hunt" || g.down[id] || g.fuses.some((f) => f.b === id)) return;
+  const f = g.fuses[i], who = people().find((c) => c.id === id);
+  if (!f || f.in || f.b || !who || dist(who, f) > CONFIG.reach + 1.2) return;
+  const G = clone(g); G.fuses[i].b = id; writeGame(G);
+}
+
+// ── HUD & RESULTS ───────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const fmt = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}`;
+let board = null, boardFor = -1;
+function hud(g) {
+  const t = Date.now(), all = people(), mine = all.find((c) => c.mine);
+  if (ATTRACT) { for (const id of ["fuses", "clock", "team", "big", "msg", "net"]) $(id).textContent = ""; return; }
+  const inn = g.fuses.filter((f) => f.in).length;
+  $("fuses").textContent = `⚡ ${inn} / ${g.fuses.length} fuses`;
+  $("clock").textContent = g.phase === "hunt" ? `${fmt(Math.max(0, g.endsAt - t))} until the lights stay out` : "";
+  $("team").innerHTML = all.map((c) => `<div class="${c.mine ? "me" : ""}">${esc(c.mine ? "You" : c.name)} ${g.down[c.id] ? "✖" : g.fuses.some((f) => f.b === c.id) ? "⚡" : c.light ? "🔦" : "·"}</div>`).join("");
+  $("big").innerHTML = g.phase === "brief" ? `Find ${g.fuses.length} fuses in the dark<small>Bring them to the breaker. Don't get caught. ${Math.max(1, Math.ceil((g.startAt - t) / 1000))}…</small>` : "";
+  let msg = "";
+  if (g.phase === "hunt") {
+    if (!me.firstHunt) me.firstHunt = t;
+    const helping = all.find((c) => g.down[c.id] && c.id !== net.sessionId && dist(c, me) < CONFIG.reach + 0.3);
+    if (g.down[net.sessionId]) msg = g.rev[net.sessionId] ? "A teammate is getting you up…" : "You were caught! Wait for a teammate to revive you.";
+    else if (helping) msg = `Reviving ${esc(helping.name)}… stay close`;
+    else if (g.fuses.some((f) => f.b === net.sessionId)) msg = "Got a fuse! Bring it to the breaker (follow the arrow).";
+    else if (t - me.firstHunt < 9000) msg = touchUI ? "Left thumb walks · RUN is loud · LIGHT off hides you, but you can't see" : "WASD walk · mouse aims your flashlight · Shift runs (loud) · F light off hides you";
+  }
+  $("msg").textContent = msg;
+  const n = livePlayers().length;
+  $("net").textContent = net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the monster" : ""}`;
+  const over = g.phase === "won" || g.phase === "lost";
+  $("over").hidden = !over;
+  if (over) {
+    $("overTitle").textContent = g.phase === "won" ? "Power restored!" : "The lights stay out";
+    $("overLine").textContent = g.phase === "won" ? `Your team escaped in ${fmt(g.ms)}.` : `${inn} of ${g.fuses.length} fuses made it to the breaker.`;
+    $("next").textContent = `Next run in ${Math.max(0, Math.ceil((g.endsAt - t) / 1000))}s`;
+    if (boardFor !== g.id) { boardFor = g.id; showBoard(g); }
+  }
+}
+function showBoard(g) {
+  const list = $("board");
+  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  const submit = g.phase === "won" && me.gameId === g.id ? board.submit(Math.max(0, 600000 - g.ms)).catch(() => null) : Promise.resolve();
+  submit.then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${fmt(600000 - e.score)}</span></li>`).join("") : "<li>No escapes yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+/** Keep a color nobody else has: the later sessionId gives way, and the bots' colors count as taken. */
+function fixColor() {
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId), bots = botList().map((b) => b.c);
+  if (!others.some(([id, p]) => id < net.sessionId && p.c === myColor) && !bots.includes(myColor)) return;
+  const used = new Set([...others.map(([, p]) => p.c), ...bots]);
+  myColor = COLORS.find((c) => !used.has(c)) || myColor;
+  net.me.set("c", myColor); if (me.g) me.g.userData.mat.color.set(myColor);
+}
+$("again").onclick = () => { if (isHost()) host.again = true; else net.send("again", {}); };
+
+/** One-off effects worked out from what changed in state (so nobody misses one). */
+let prevG = null;
+function effects(g) {
+  if (prevG && prevG.id === g.id) {
+    for (const id of Object.keys(g.down)) if (!prevG.down[id]) { const c = people().find((o) => o.id === id); if (c) burst(c.x, 1, c.z, "#ff2233", 18, 4); sound(id === net.sessionId ? "caught" : "thud"); if (id === net.sessionId) shake = 0.6; }
+    for (const id of Object.keys(prevG.down)) if (!g.down[id] && g.phase === "hunt") sound("revive");
+    g.fuses.forEach((f, i) => { const p = prevG.fuses[i]; if (!p) return; if (f.in && !p.in) { burst(BREAKER.x, 1.6, BREAKER.z, "#ffd23f", 24, 5); sound("fuse"); } else if (f.b && !p.b) sound("pick"); });
+    if (g.phase === "won" && prevG.phase !== "won") sound("power");
+  }
+  prevG = g;
+}
+
+// ── INPUT & SOUND ───────────────────────────────────────────────────────────────────
+const touchUI = matchMedia("(pointer: coarse)").matches && !ATTRACT;
+$("pad").hidden = !touchUI;
+if (touchUI) { $("msg").style.bottom = "calc(max(18px, env(safe-area-inset-bottom)) + 100px)"; Object.assign($("net").style, { top: "calc(max(12px, env(safe-area-inset-top)) + 54px)", bottom: "auto", left: "16px", transform: "none" }); }
+const KEYS = { w: "up", ArrowUp: "up", s: "down", ArrowDown: "down", a: "left", ArrowLeft: "left", d: "right", ArrowRight: "right", Shift: "run" };
+addEventListener("keydown", (e) => { const k = KEYS[e.key.length === 1 ? e.key.toLowerCase() : e.key]; if (k) { e.preventDefault(); input[k] = true; } if (e.key.toLowerCase() === "f" && !e.repeat) toggleLight(); });
+addEventListener("keyup", (e) => { const k = KEYS[e.key.length === 1 ? e.key.toLowerCase() : e.key]; if (k) input[k] = false; });
+addEventListener("blur", () => { for (const k in input) input[k] = false; });
+function toggleLight() { me.light = !me.light; document.querySelector('[data-k="light"]').classList.toggle("on", me.light); sound("click"); }
+const cv = renderer.domElement;
+cv.addEventListener("pointermove", (e) => {
+  if (e.pointerType === "mouse") { aim.on = true; aim.nx = (e.clientX / innerWidth) * 2 - 1; aim.ny = -(e.clientY / innerHeight) * 2 + 1; }
+  if (e.pointerId === stick.id) {
+    const dx = e.clientX - stick.ox, dy = e.clientY - stick.oy, d = Math.hypot(dx, dy), k = Math.min(1, d / 50) / (d || 1);
+    stick.x = dx * k; stick.y = dy * k; $("stick").firstElementChild.style.transform = `translate(${stick.x * 35}px, ${stick.y * 35}px)`;
+  }
+});
+cv.addEventListener("pointerdown", (e) => {
+  e.preventDefault(); unlockAudio();
+  if (e.pointerType !== "mouse" && stick.id < 0) { stick.id = e.pointerId; stick.ox = e.clientX; stick.oy = e.clientY; Object.assign($("stick").style, { left: e.clientX + "px", top: e.clientY + "px" }); $("stick").hidden = false; }
+});
+for (const ev of ["pointerup", "pointercancel"]) cv.addEventListener(ev, (e) => { if (e.pointerId === stick.id) { stick.id = -1; stick.x = stick.y = 0; $("stick").hidden = true; } });
+for (const b of document.querySelectorAll(".pad button")) {
+  b.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); if (b.dataset.k === "light") toggleLight(); else { input.run = true; b.classList.add("on"); } });
+  for (const ev of ["pointerup", "pointercancel"]) b.addEventListener(ev, () => { if (b.dataset.k === "run") { input.run = false; b.classList.remove("on"); } });
+}
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+let AC = null;
+function unlockAudio() { if (!AC && !ATTRACT) try { AC = new AudioContext(); } catch {} }
+addEventListener("keydown", unlockAudio);
+function sound(kind) {
+  if (!AC) return;
+  const t0 = AC.currentTime, tone = (f, d, type, v, f2) => {
+    const o = AC.createOscillator(), g = AC.createGain(); o.type = type; o.frequency.setValueAtTime(f, t0); o.frequency.exponentialRampToValueAtTime(f2, t0 + d);
+    g.gain.setValueAtTime(v, t0); g.gain.exponentialRampToValueAtTime(0.001, t0 + d); o.connect(g).connect(AC.destination); o.start(t0); o.stop(t0 + d);
+  };
+  if (kind === "beat") tone(68, 0.16, "sine", 0.4, 40);
+  if (kind === "click") tone(1200, 0.04, "square", 0.05, 900);
+  if (kind === "pick") tone(660, 0.15, "triangle", 0.15, 990);
+  if (kind === "fuse") { tone(160, 0.3, "square", 0.08, 80); tone(880, 0.35, "sine", 0.12, 1320); }
+  if (kind === "caught") tone(420, 0.7, "sawtooth", 0.15, 50);
+  if (kind === "thud") tone(200, 0.3, "sawtooth", 0.07, 60);
+  if (kind === "revive") tone(440, 0.25, "triangle", 0.14, 880);
+  if (kind === "power") { tone(55, 1.4, "sawtooth", 0.08, 220); tone(523, 1, "sine", 0.12, 1046); }
+}
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let last = performance.now(), lastHb = 0, lastHud = 0, shake = 0, nextBeat = 0, power = 0;
+const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(), arrow = new THREE.Mesh(new THREE.ConeGeometry(0.28, 0.7, 3).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: "#ffd23f" }));
+scene.add(arrow);
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000), t = now / 1000; last = now;
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); }
+  if (isHost()) hostTick(dt, now); else host.was = false;
+  const g = game();
+  if (!g) { renderer.render(scene, camera); return requestAnimationFrame(frame); }
+  myTick(dt, g); effects(g);
+  // People: everyone else eased toward where they last said they were, bots, then me.
+  const seen = new Set(), drawn = [], live = new Set(livePlayers()), rev = (id) => (g.rev[id] ? (Date.now() - g.rev[id]) / CONFIG.reviveMs : 0);
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const q = id !== net.sessionId && live.has(id) && posOf(id, p);
+    if (!q || q.g !== g.id) continue;
+    const v = viewOf(id, p.c || "#ccc", p.n || "Player"); seen.add(id); ease(v, q.x, q.z, q.h, dt);
+    drawn.push({ v, light: !!q.l, id });
+  }
+  for (const b of botList()) { const v = viewOf(b.i, b.c, b.n); seen.add(b.i); ease(v, b.x, b.z, b.h, dt); drawn.push({ v, light: true, id: b.i }); }
+  for (const [id, v] of views) if (!seen.has(id)) { scene.remove(v.g); views.delete(id); }
+  if (!me.g) me.g = makePerson(myColor, "");
+  me.g.position.set(me.x, 0, me.z); me.g.rotation.y = me.h;
+  const hunting = g.phase === "hunt";
+  for (const d of [...drawn, { v: { g: me.g }, light: me.light, id: net.sessionId }]) pose(d.v.g, hunting && !!g.down[d.id], rev(d.id), g.fuses.some((f) => f.b === d.id), t);
+  // Flashlights: mine first (it casts the shadows), then the nearest others.
+  drawn.sort((a, b) => dist(a.v.g.position, me) - dist(b.v.g.position, me));
+  const lit = [{ x: me.x, z: me.z, h: me.h, on: me.light, id: net.sessionId }, ...drawn.map((d) => ({ x: d.v.g.position.x, z: d.v.g.position.z, h: d.v.g.rotation.y, on: d.light, id: d.id }))];
+  torches.forEach((L, i) => { const c = lit[i]; if (c) aimTorch(L, c.x, c.z, c.h, c.on, hunting && !!g.down[c.id], t, i); else L.intensity = 0; });
+  for (const d of drawn) d.v.g.userData.lens.visible = d.light;
+  me.g.userData.lens.visible = me.light;
+  // Monster
+  const m = isHost() ? host.mon : shared("mon", null);
+  if (m) {
+    if (isHost()) { monView.x = m.x; monView.z = m.z; monView.h = m.h; monView.fresh = false; } else { const k = 1 - Math.pow(0.001, dt); if (monView.fresh) Object.assign(monView, m, { fresh: false }); monView.x += (m.x - monView.x) * k; monView.z += (m.z - monView.z) * k; monView.h += angDiff(m.h, monView.h) * k; }
+    const chasing = m.s === "chase", gone = g.phase === "won";
+    monster.position.set(monView.x, Math.abs(Math.sin(t * (chasing ? 9 : 4))) * 0.12, monView.z); monster.rotation.y = monView.h;
+    monster.scale.setScalar(THREE.MathUtils.lerp(monster.scale.x, gone ? 0.01 : 1, 0.05));
+    monster.userData.haze.material.opacity = chasing ? 0.85 : 0.45; monster.userData.haze.scale.setScalar(chasing ? 5.5 : 4.5);
+    const danger = hunting && !gone ? Math.max(0, 1 - dist(monView, me) / 12) * (chasing && m.t === net.sessionId ? 1 : 0.7) : 0;
+    $("fear").style.opacity = ATTRACT ? danger * 0.5 : g.down[net.sessionId] && hunting ? 0.8 : danger;
+    if (danger > 0.15 && now > nextBeat) { nextBeat = now + 1150 - 700 * danger; sound("beat"); }
+  }
+  // Fuses on the floor, lamps on the breaker, the arrow when you carry one.
+  g.fuses.forEach((f, i) => {
+    const v = fuseViews[i] || (fuseViews[i] = makeFuse(true));
+    v.visible = !f.in && !f.b; v.position.set(f.x, 0.55 + Math.sin(t * 3 + i) * 0.1, f.z); v.rotation.set(0.3, t * 1.5, 0);
+  });
+  for (let i = g.fuses.length; i < fuseViews.length; i++) fuseViews[i].visible = false;
+  const inn = g.fuses.filter((f) => f.in).length;
+  lamps.forEach((l, i) => l.material.color.set(i < inn ? "#7dff8a" : i < g.fuses.length ? "#5a1010" : "#222"));
+  power += ((g.phase === "won" ? 1 : 0) - power) * Math.min(1, dt * 1.5);
+  const pulse = 0.6 + 0.4 * Math.sin(t * 3);
+  breakerLight.color.set(power > 0.5 ? "#9dffb0" : "#ff3030"); breakerLight.intensity = 6 * (power > 0.5 ? 1 : pulse);
+  breakerGlow.material.color.set(power > 0.5 ? "#9dffb0" : "#ff3030"); breakerGlow.material.opacity = 0.35 + 0.25 * pulse;
+  moon.intensity = CONFIG.ambient + power * 1.4; mains.intensity = power * 1.6;
+  const carrying = g.fuses.some((f) => f.b === net.sessionId);
+  arrow.visible = carrying && !ATTRACT;
+  if (arrow.visible) { const a = Math.atan2(BREAKER.x - me.x, BREAKER.z - me.z); arrow.position.set(me.x + Math.sin(a) * 1.3, 0.25, me.z + Math.cos(a) * 1.3); arrow.rotation.y = a; }
+  for (let i = bits.length - 1; i >= 0; i--) {
+    const b = bits[i]; b.life -= dt; b.vy -= 6 * dt; b.s.position.x += b.vx * dt; b.s.position.y = Math.max(0.05, b.s.position.y + b.vy * dt); b.s.position.z += b.vz * dt;
+    b.s.material.opacity = Math.max(0, b.life); if (b.life <= 0) { scene.remove(b.s); bits.splice(i, 1); }
+  }
+  // Camera: high and behind, a little higher on a tall phone screen. ?attract follows whoever is being chased.
+  let focus = me;
+  if (ATTRACT && m) { // spectate the monster and whoever is closest to it
+    const prey = people().filter((c) => !g.down[c.id]).sort((a, b) => dist(a, monView) - dist(b, monView))[0] || me, d = dist(prey, monView), k = Math.min(0.5, 5 / Math.max(d, 0.01));
+    focus = { x: monView.x + (prey.x - monView.x) * k, z: monView.z + (prey.z - monView.z) * k };
+  }
+  const tall = camera.aspect < 1, hgt = ATTRACT ? 9 : tall ? 19 : 14, back = ATTRACT ? 5.5 : tall ? 9 : 8.5;
+  camLook.lerp(new THREE.Vector3(focus.x, 0, focus.z), 1 - Math.pow(0.02, dt));
+  camPos.set(camLook.x, hgt, camLook.z + back);
+  shake = Math.max(0, shake - dt);
+  camera.position.copy(camPos).add(new THREE.Vector3((Math.random() - 0.5) * shake, 0, (Math.random() - 0.5) * shake));
+  camera.lookAt(camLook);
+  renderer.render(scene, camera);
+  if (now - lastHud > 120) { lastHud = now; hud(g); fixColor(); }
+  requestAnimationFrame(frame);
+}
+
+(async function start() {
+  net = await connect();
+  me.id = net.sessionId;
+  net.onState((st) => { S = st; });
+  net.on("take", (msg, from) => { if (isHost() && msg) applyTake(from, msg.i); });
+  net.on("again", () => { const g = game(); if (isHost() && g && (g.phase === "won" || g.phase === "lost")) host.again = true; });
+  net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
+  myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
+  net.me.set({ n: myName, c: myColor, hb: Date.now() });
+  camLook.set(me.x, 0, me.z);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
