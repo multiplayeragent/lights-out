@@ -745,11 +745,12 @@ let last = performance.now(), lastHb = 0, lastHud = 0, shake = 0, nextBeat = 0, 
 const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(), arrow = new THREE.Mesh(new THREE.ConeGeometry(0.28, 0.7, 3).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: "#ffd23f" }));
 scene.add(arrow);
 function frame(now) {
+  requestAnimationFrame(frame);
   const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)), t = now / 1000; last = now; // never negative: the first frame can be stamped before `last`
   if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); }
   if (isHost()) hostTick(dt, now); else host.was = false;
   const g = game();
-  if (!g) { renderer.render(scene, camera); return requestAnimationFrame(frame); }
+  if (!g) { renderer.render(scene, camera); return; }
   myTick(dt, g); effects(g);
   // People: everyone else eased toward where they last said they were, bots, then me.
   const seen = new Set(), drawn = [], live = new Set(livePlayers()), rev = (id) => (g.rev[id] ? (Date.now() - g.rev[id]) / CONFIG.reviveMs : 0);
@@ -817,7 +818,6 @@ function frame(now) {
   camera.lookAt(camLook);
   renderer.render(scene, camera);
   if (now - lastHud > 120) { lastHud = now; hud(g); fixColor(); }
-  requestAnimationFrame(frame);
 }
 
 (async function start() {
