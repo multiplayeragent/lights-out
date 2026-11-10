@@ -430,7 +430,7 @@ function adopt() {
   host.mon = { x: m ? m.x : MON_START.x, z: m ? m.z : MON_START.z, h: m ? m.h : 0, s: m && m.s !== "eat" ? m.s : "patrol", t: m ? m.t : "", goal: null, path: [], think: 0, until: 0, lostAt: Date.now() };
 }
 function botList() {
-  if (isHost()) return [...host.bots.values()].map((b) => ({ i: b.id, n: b.name, c: b.color, x: b.x, z: b.z, h: b.h, r: b.r ? 1 : 0, mv: b.mv ? 1 : 0 }));
+  if (isHost() && host.was) return [...host.bots.values()].map((b) => ({ i: b.id, n: b.name, c: b.color, x: b.x, z: b.z, h: b.h, r: b.r ? 1 : 0, mv: b.mv ? 1 : 0 })); // host.was: adopted (not leftovers from an earlier turn as host)
   return shared("bots", []);
 }
 const posCache = new Map();
@@ -633,6 +633,7 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const fmt = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}`;
 let board = null, boardFor = -1;
+let dropped = false; // true while the connection is down: the HUD keeps showing "Reconnecting…"
 function hud(g) {
   const t = Date.now(), all = people(), mine = all.find((c) => c.mine);
   if (ATTRACT) { for (const id of ["fuses", "clock", "team", "big", "msg", "net"]) $(id).textContent = ""; return; }
@@ -652,7 +653,7 @@ function hud(g) {
   }
   $("msg").textContent = msg;
   const n = livePlayers().length;
-  $("net").textContent = net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the monster" : ""}`;
+  $("net").textContent = net.offline ? "Offline: playing with bots" : dropped ? "Reconnecting…" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the monster" : ""}`;
   const over = g.phase === "won" || g.phase === "lost";
   $("over").hidden = !over;
   if (over) {
@@ -744,7 +745,7 @@ let last = performance.now(), lastHb = 0, lastHud = 0, shake = 0, nextBeat = 0, 
 const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(), arrow = new THREE.Mesh(new THREE.ConeGeometry(0.28, 0.7, 3).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: "#ffd23f" }));
 scene.add(arrow);
 function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000), t = now / 1000; last = now;
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)), t = now / 1000; last = now; // never negative: the first frame can be stamped before `last`
   if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); }
   if (isHost()) hostTick(dt, now); else host.was = false;
   const g = game();
@@ -825,9 +826,10 @@ function frame(now) {
   net.onState((st) => { S = st; });
   net.on("take", (msg, from) => { if (isHost() && msg) applyTake(from, msg.i); });
   net.on("again", () => { const g = game(); if (isHost() && g && (g.phase === "won" || g.phase === "lost")) host.again = true; });
-  net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
+  net.onDisconnect(() => { dropped = true; $("net").textContent = "Reconnecting…"; });
+  net.onReconnect(() => { dropped = false; });
   if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
-  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
+  const taken = new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...shared("bots", []).map((b) => b.c)]);
   myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
   net.me.set({ n: myName, c: myColor, hb: Date.now() });
   camLook.set(me.x, 0, me.z);
