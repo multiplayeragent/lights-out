@@ -24,6 +24,7 @@
   .card h2 { margin: 0 0 4px; font-size: 24px; }
   .card h3 { margin: 14px 0 4px; font-size: 14px; color: #ffd23f; }
   .card ol { margin: 0; padding-left: 24px; font-size: 14px; }
+  .card li.note { list-style: none; margin-left: -24px; } /* a status line, not a numbered entry */
   .card li span { float: right; font-variant-numeric: tabular-nums; }
   .card p { margin: 6px 0 0; font-size: 14px; opacity: .85; }
   button.go { margin-top: 16px; width: 100%; min-height: 48px; border: 0; border-radius: 12px; background: #ffd23f; color: #1b1400; font: 800 17px system-ui, sans-serif; cursor: pointer; }
@@ -48,7 +49,7 @@
 <div class="pad" id="pad" hidden><button data-k="run">RUN</button><button data-k="light" class="on">LIGHT</button></div>
 <div id="over" hidden><div class="card">
   <h2 id="overTitle"></h2><p id="overLine"></p>
-  <h3>Fastest escapes</h3><ol id="board"><li>Loading…</li></ol>
+  <h3>Fastest escapes</h3><ol id="board"><li class="note">Loading…</li></ol>
   <button class="go" id="again">Play again</button>
   <p id="next"></p>
 </div></div>
@@ -97,6 +98,7 @@ const CONFIG = {
   resultsMs: 12000,     // ms the results show before the next run
   walk: 3.4, run: 5.6,  // your speeds, units/s (running is loud)
   botWalk: 3.0, botRun: 5.0,  // bot teammates: a little slower walking, about as fast as the monster running
+  botHideRange: 9,      // a bot switches its flashlight off while the monster is this close and in sight (or chasing it)
   radius: 0.35,         // how wide a person is, for walls
   // The monster: speeds (units/s), how far it sees (flashlight on / off) and hears (walking / running),
   // ms it stays asleep after the lights go out, ms it stops after a catch, ms it keeps chasing what it lost.
@@ -363,7 +365,7 @@ function viewOf(id, color, name) {
   return v;
 }
 function ease(v, x, z, h, dt) {
-  if (v.fresh) { v.x = x; v.z = z; v.h = h; v.fresh = false; }
+  if (v.fresh || Math.hypot(x - v.x, z - v.z) > 6) { v.x = x; v.z = z; v.h = h; v.fresh = false; } // a new run puts everyone back at the start: snap, don't slide through the walls
   const k = 1 - Math.pow(0.0008, dt);
   v.x += (x - v.x) * k; v.z += (z - v.z) * k; v.h += angDiff(h, v.h) * k;
   v.g.position.set(v.x, 0, v.z); v.g.rotation.y = v.h;
@@ -418,7 +420,7 @@ function startRun(id) {
   host.gameId = g.id; host.known.clear(); host.searched.clear();
   host.mon = { x: MON_START.x, z: MON_START.z, h: 0, s: "patrol", t: "", goal: null, path: [], think: 0, until: 0, lostAt: 0 };
   let n = 0;
-  for (const b of host.bots.values()) Object.assign(b, spawnSpot(4 + n++), { path: [], goal: null, mode: "search", think: 0 });
+  for (const b of host.bots.values()) Object.assign(b, spawnSpot(4 + n++), { path: [], goal: null, mode: "search", think: 0, light: true });
   return g;
 }
 /** Spot n of a small ring around the start (players take 0-3, bots 4 and up). */
@@ -426,12 +428,12 @@ const spawnSpot = (n) => ({ x: SPAWN.x + Math.sin(n * 2.4) * 1.4 * (n ? 1 : 0), 
 /** Become host: take over the run, the monster and the bots exactly as state has them. */
 function adopt() {
   host.was = true; host.gameId = game()?.id || 0; host.bots.clear();
-  for (const b of shared("bots", [])) host.bots.set(b.i, { id: b.i, name: b.n, color: b.c, x: b.x, z: b.z, h: b.h, path: [], goal: null, mode: "search", think: 0 });
+  for (const b of shared("bots", [])) host.bots.set(b.i, { id: b.i, name: b.n, color: b.c, x: b.x, z: b.z, h: b.h, light: b.l !== 0, path: [], goal: null, mode: "search", think: 0 });
   const m = shared("mon", null);
   host.mon = { x: m ? m.x : MON_START.x, z: m ? m.z : MON_START.z, h: m ? m.h : 0, s: m && m.s !== "eat" ? m.s : "patrol", t: m ? m.t : "", goal: null, path: [], think: 0, until: 0, lostAt: Date.now() };
 }
 function botList() {
-  if (isHost() && host.was) return [...host.bots.values()].map((b) => ({ i: b.id, n: b.name, c: b.color, x: b.x, z: b.z, h: b.h, r: b.r ? 1 : 0, mv: b.mv ? 1 : 0 })); // host.was: adopted (not leftovers from an earlier turn as host)
+  if (isHost() && host.was) return [...host.bots.values()].map((b) => ({ i: b.id, n: b.name, c: b.color, x: b.x, z: b.z, h: b.h, l: b.light === false ? 0 : 1, r: b.r ? 1 : 0, mv: b.mv ? 1 : 0 })); // host.was: adopted (not leftovers from an earlier turn as host)
   return shared("bots", []);
 }
 const posCache = new Map();
@@ -445,7 +447,7 @@ function people() {
     const q = posOf(id, p);
     if (live.has(id) && q) out.push({ id, name: p.n || "Player", color: p.c || "#ccc", x: q.x, z: q.z, h: q.h, light: !!q.l, noise: q.m || 0 });
   }
-  for (const b of botList()) out.push({ id: b.i, name: b.n, color: b.c, x: b.x, z: b.z, h: b.h, light: true, noise: b.r ? 2 : b.mv ? 1 : 0, bot: true });
+  for (const b of botList()) out.push({ id: b.i, name: b.n, color: b.c, x: b.x, z: b.z, h: b.h, light: b.l !== 0, noise: b.r ? 2 : b.mv ? 1 : 0, bot: true });
   return out;
 }
 
@@ -464,7 +466,7 @@ function hostTick(dt, now) {
     for (const f of G.fuses) { // carriers: gone → drop it; at the breaker → plug it in
       if (f.in || !f.b) continue;
       const c = all.find((o) => o.id === f.b);
-      if (!c) { Object.assign(f, host.lastPos.get(f.b) || {}, { b: "" }); dirty = true; }
+      if (!c) { const q = host.lastPos.get(f.b) || (posCache.get(f.b) || {}).v; Object.assign(f, q ? { x: q.x, z: q.z } : {}, { b: "" }); dirty = true; } // gone (even the host before me): drop it where they were last seen
       else if (dist(c, BREAKER) < CONFIG.breakerReach) { Object.assign(f, { b: "", in: 1, x: BREAKER.x, z: BREAKER.z }); dirty = true; }
     }
     for (const id of Object.keys(G.down)) { // reviving: a teammate standing next to you for reviveMs
@@ -542,7 +544,7 @@ function monsterTick(dt, G, up, t) {
   return false;
 }
 
-/** Bot teammates (and your own player in ?attract): search the rooms, fetch fuses, revive, flee. */
+/** Bot teammates (and your own player in ?attract): search the rooms, fetch fuses, revive, flee, and switch their light off to hide. */
 function botsTick(dt, G, all, t) {
   let dirty = false;
   const agents = [...host.bots.values()];
@@ -576,6 +578,8 @@ function botThink(b, G, all) {
     else if (b.mode === "search" && b.goal && dist(b, b.goal) > 1.5 && b.path.length) goal = b.goal;
     else { const open = FUSE_SPOTS.filter((s) => !host.searched.has(s)), list = open.length ? open : FUSE_SPOTS; goal = list[Math.floor(Math.random() * list.length)]; }
   }
+  const close = m.s !== "eat" && dist(m, b) < CONFIG.botHideRange && canSee(m, b), light = !(close || mode === "flee"); // the monster close by: light off to hide, like a player would
+  b.light = light; // (in ?attract this is your own flashlight too: me.light)
   const same = b.goal && b.mode === mode && toCell(goal.x) === toCell(b.goal.x) && toCell(goal.z) === toCell(b.goal.z) && b.path.length;
   b.mode = mode; b.goal = goal;
   if (!same) b.path = route(b, goal);
@@ -666,11 +670,11 @@ function hud(g) {
 }
 function showBoard(g) {
   const list = $("board");
-  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  if (!board) { list.innerHTML = "<li class='note'>Leaderboards need a connection.</li>"; return; }
   const submit = g.phase === "won" && me.gameId === g.id ? board.submit(Math.max(0, 600000 - g.ms)).catch(() => null) : Promise.resolve();
   submit.then(() => board.top(10)).then(({ entries }) => {
-    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${fmt(600000 - e.score)}</span></li>`).join("") : "<li>No escapes yet. Be the first.</li>";
-  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${fmt(600000 - e.score)}</span></li>`).join("") : "<li class='note'>No escapes yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li class='note'>Couldn't load the leaderboard.</li>"; });
 }
 /** Keep a color nobody else has: the later sessionId gives way, and the bots' colors count as taken. */
 function fixColor() {
@@ -704,6 +708,7 @@ addEventListener("keyup", (e) => { const k = KEYS[e.key.length === 1 ? e.key.toL
 addEventListener("blur", () => { for (const k in input) input[k] = false; });
 function toggleLight() { me.light = !me.light; document.querySelector('[data-k="light"]').classList.toggle("on", me.light); sound("click"); }
 const cv = renderer.domElement;
+cv.addEventListener("contextmenu", (e) => e.preventDefault());
 cv.addEventListener("pointermove", (e) => {
   if (e.pointerType === "mouse") { aim.on = true; aim.nx = (e.clientX / innerWidth) * 2 - 1; aim.ny = -(e.clientY / innerHeight) * 2 + 1; }
   if (e.pointerId === stick.id) {
@@ -763,7 +768,7 @@ function frame(now) {
     const v = viewOf(id, p.c || "#ccc", p.n || "Player"); seen.add(id); ease(v, q.x, q.z, q.h, dt);
     drawn.push({ v, light: !!q.l, id });
   }
-  for (const b of botList()) { const v = viewOf(b.i, b.c, b.n); seen.add(b.i); ease(v, b.x, b.z, b.h, dt); drawn.push({ v, light: true, id: b.i }); }
+  for (const b of botList()) { const v = viewOf(b.i, b.c, b.n); seen.add(b.i); ease(v, b.x, b.z, b.h, dt); drawn.push({ v, light: b.l !== 0, id: b.i }); }
   for (const [id, v] of views) if (!seen.has(id)) { scene.remove(v.g); views.delete(id); }
   if (!me.g) me.g = makePerson(myColor, "");
   me.g.position.set(me.x, 0, me.z); me.g.rotation.y = me.h;
@@ -778,7 +783,7 @@ function frame(now) {
   // Monster
   const m = isHost() ? host.mon : shared("mon", null);
   if (m) {
-    if (isHost()) { monView.x = m.x; monView.z = m.z; monView.h = m.h; monView.fresh = false; } else { const k = 1 - Math.pow(0.001, dt); if (monView.fresh) Object.assign(monView, m, { fresh: false }); monView.x += (m.x - monView.x) * k; monView.z += (m.z - monView.z) * k; monView.h += angDiff(m.h, monView.h) * k; }
+    if (isHost()) { monView.x = m.x; monView.z = m.z; monView.h = m.h; monView.fresh = false; } else { const k = 1 - Math.pow(0.001, dt); if (monView.fresh || Math.hypot(m.x - monView.x, m.z - monView.z) > 6) Object.assign(monView, { x: m.x, z: m.z, h: m.h, fresh: false }); monView.x += (m.x - monView.x) * k; monView.z += (m.z - monView.z) * k; monView.h += angDiff(m.h, monView.h) * k; }
     const chasing = m.s === "chase", gone = g.phase === "won";
     monster.position.set(monView.x, Math.abs(Math.sin(t * (chasing ? 9 : 4))) * 0.12, monView.z); monster.rotation.y = monView.h;
     monster.scale.setScalar(THREE.MathUtils.lerp(monster.scale.x, gone ? 0.01 : 1, 0.05));
