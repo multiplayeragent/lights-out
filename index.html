@@ -569,10 +569,11 @@ function botThink(b, G, all) {
   if (m.s !== "eat" && ((m.s === "chase" && m.t === b.id) || (dist(m, b) < 5 && canSee(m, b)))) {
     mode = "flee"; goal = [...FUSE_SPOTS, SPAWN].filter((s) => dist(s, m) > dist(s, b) + 2).sort((p, q) => dist(q, m) - dist(q, b) * 0.6 - (dist(p, m) - dist(p, b) * 0.6))[0] || SPAWN;
   } else {
-    const hurt = near(all.filter((c) => G.down[c.id] && c.id !== b.id && dist(c, m) > 4 && dist(c, b) < (mine ? 10 : 18)));
+    const helped = new Set([...host.bots.values()].filter((o) => o !== b && o.mode === "revive").map((o) => o.ri)); // a downed player gets one bot from anywhere, others help if they're near
+    const hurt = near(all.filter((c) => G.down[c.id] && c.id !== b.id && dist(c, m) > 4 && (dist(c, b) < (mine ? 10 : 18) || (!c.bot && !mine && !helped.has(c.id)))));
     const taken = new Set([...host.bots.values()].filter((o) => o !== b && o.mode === "fetch").map((o) => o.fi));
     const fuse = near([...host.known].filter((i) => !taken.has(i)).map((i) => ({ i, ...G.fuses[i] })).filter((f) => !f.in && !f.b));
-    if (hurt) { mode = "revive"; goal = { x: hurt.x, z: hurt.z }; }
+    if (hurt) { mode = "revive"; goal = { x: hurt.x, z: hurt.z }; b.ri = hurt.id; }
     else if (mine) { mode = "deliver"; goal = BREAKER_STAND; }
     else if (fuse) { mode = "fetch"; goal = { x: fuse.x, z: fuse.z }; b.fi = fuse.i; }
     else if (b.mode === "search" && b.goal && dist(b, b.goal) > 1.5 && b.path.length) goal = b.goal;
@@ -627,7 +628,7 @@ function myTick(dt, g) {
 /** A "take" intent (or the host's own pickup): award the fuse if it's free and you're next to it. */
 function applyTake(id, i) {
   const g = game();
-  if (!g || g.phase !== "hunt" || g.down[id] || g.fuses.some((f) => f.b === id)) return;
+  if (!g || g.phase !== "hunt" || !Number.isInteger(i) || g.down[id] || g.fuses.some((f) => f.b === id)) return; // a crafted index ("length", "0") is ignored
   const f = g.fuses[i], who = people().find((c) => c.id === id);
   if (!f || f.in || f.b || !who || dist(who, f) > CONFIG.reach + 1.2) return;
   const G = clone(g); G.fuses[i].b = id; writeGame(G);
